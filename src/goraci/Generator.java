@@ -393,8 +393,6 @@ public class Generator extends Configured implements Tool {
   }
   
   public static void main(String[] args) throws Exception {
-    // ak AKIAIAWPG2LB6XI23WTQ
-    // sk IYWQPxjR97kNNXXU1RXBFM2kewqjhlK8BNeY6hZc
     int ret = ToolRunner.run(new Generator(), args);
     System.exit(ret);
   }
