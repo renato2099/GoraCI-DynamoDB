@@ -1,9 +1,5 @@
 package goraci;
 
-import goraci.Generator.GeneratorInputFormat.GeneratorInputSplit;
-import goraci.Generator.GeneratorInputFormat.GeneratorRecordReader;
-import goraci.Verify.VerifyMapper;
-import goraci.Verify.VerifyReducer;
 import goraci.generated.cidynamonode;
 
 import java.io.DataInput;
@@ -11,6 +7,7 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.GnuParser;
@@ -20,9 +17,11 @@ import org.apache.commons.cli.ParseException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.gora.dynamodb.query.DynamoDBKey;
+import org.apache.gora.dynamodb.query.DynamoDBQuery;
 import org.apache.gora.dynamodb.store.DynamoDBStore;
-import org.apache.gora.mapreduce.GoraMapper;
+import org.apache.gora.examples.generated.person;
 import org.apache.gora.query.Query;
+import org.apache.gora.query.Result;
 import org.apache.gora.store.DataStore;
 import org.apache.gora.store.ws.impl.WSDataStoreFactory;
 import org.apache.gora.util.GoraException;
@@ -30,16 +29,20 @@ import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.VLongWritable;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapreduce.InputFormat;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.JobContext;
+import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.RecordReader;
+import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.hadoop.util.Tool;
+import org.apache.hadoop.util.ToolRunner;
 
 import com.amazonaws.auth.BasicAWSCredentials;
 
@@ -52,7 +55,11 @@ public class VerifyDynamoDB extends Configured implements Tool{
 
   private Job job;
   
-  private Object auth;
+  private static final VLongWritable DEF = new VLongWritable(-1);
+  
+  public static enum Counts {
+    UNREFERENCED, UNDEFINED, REFERENCED, CORRUPT, IGNORED
+  }
   
   @Override
   public int run(String[] args) throws Exception {
@@ -63,7 +70,7 @@ public class VerifyDynamoDB extends Configured implements Tool{
     CommandLine cmd = null;
     try {
       cmd = parser.parse(options, args);
-      if (cmd.getArgs().length != 5) {
+      if (cmd.getArgs().length != 6) {
         throw new ParseException("Did not see expected # of arguments, saw " + cmd.getArgs().length);
       }
     } catch (ParseException e) {
@@ -76,35 +83,30 @@ public class VerifyDynamoDB extends Configured implements Tool{
 
     String outputDir = cmd.getArgs()[0];
     int totNodes = Integer.parseInt(cmd.getArgs()[1]);
-    int numReducers = Integer.parseInt(cmd.getArgs()[2]);
-    String accessKey = cmd.getArgs()[3];
-    String secretKey = cmd.getArgs()[4];
+    int numMappers = Integer.parseInt(cmd.getArgs()[2]);
+    int numReducers = Integer.parseInt(cmd.getArgs()[3]);
+    String accessKey = cmd.getArgs()[4];
+    String secretKey = cmd.getArgs()[5];
 
-    return run(outputDir, numReducers, totNodes, cmd.hasOption("c"), accessKey, secretKey);
+    return run(outputDir, numMappers, numReducers, totNodes, cmd.hasOption("c"), accessKey, secretKey);
   }
 
-  public int run(String outputDir, int numReducers, int totNodes, boolean concurrent, String accessKey, String secretKey) throws Exception {
-    return run(new Path(outputDir), numReducers, totNodes, concurrent, accessKey, secretKey);
+  public int run(String outputDir, int numMappers, int numReducers, int totNodes, boolean concurrent, String accessKey, String secretKey) throws Exception {
+    return run(new Path(outputDir), numMappers, numReducers, totNodes, concurrent, accessKey, secretKey);
   }
   
-  public int run(Path outputDir, int numReducers, int totNodes, boolean concurrent, String accessKey, String secretKey) throws Exception {
+  public int run(Path outputDir, int numMappers, int numReducers, int totNodes, boolean concurrent, String accessKey, String secretKey) throws Exception {
     // Running the job
-    start(outputDir, numReducers, totNodes, concurrent, accessKey, secretKey);
+    start(outputDir, numMappers, numReducers, totNodes, concurrent, accessKey, secretKey);
     // Waiting for the job to be completed
     boolean success = job.waitForCompletion(true);
     // Whether job's execution was successful  
     return success ? 0 : 1;
   }
   
-  @SuppressWarnings({ "unchecked", "rawtypes" })
-  public void start(Path outputDir, int numReducers, int totNodes, boolean concurrent, String accessKey, String secretKey) throws GoraException, IOException, Exception {
+  public void start(Path outputDir, int numMappers, int numReducers, int totNodes, boolean concurrent, String accessKey, String secretKey) throws GoraException, IOException, Exception {
     LOG.info("Running Verify with outputDir=" + outputDir +", totNodes=" + totNodes);
     
-    //DataStore<Long,CINode> store = DataStoreFactory.getDataStore(Long.class, CINode.class, new Configuration());
-    auth = new BasicAWSCredentials( accessKey, secretKey);
-    
-    DataStore<Long,cidynamonode> store = WSDataStoreFactory.createDataStore(DynamoDBStore.class, DynamoDBKey.class, cidynamonode.class, auth);
-
     job = new Job(getConf());
     
     if (!job.getConfiguration().get("io.serializations").contains("org.apache.hadoop.io.serializer.JavaSerialization")) {
@@ -112,37 +114,199 @@ public class VerifyDynamoDB extends Configured implements Tool{
     }
 
     job.setJobName("Link Verifier");
+    job.setInputFormatClass(VerifierInputFormat.class);
+    job.setOutputKeyClass(LongWritable.class);
+    job.setOutputValueClass(VLongWritable.class);
+    
+    job.getConfiguration().setInt("goraci.generator.mappers", numMappers);
     job.setNumReduceTasks(numReducers);
     job.setJarByClass(getClass());
+    job.getConfiguration().set("goraci.amazon.accessKey", accessKey);
+    job.getConfiguration().set("goraci.amazon.secretKey", secretKey);
+    job.getConfiguration().setBoolean("mapred.map.tasks.speculative.execution", false);
     
-    Query query = store.newQuery();
     //if (!concurrent) {
       // no concurrency filtering, only need prev field
       //query.setFields("prev");
     //} else {
-      //readFlushed(job.getCon  figuration());
+      //readFlushed(job.getConfiguration());
     //}
 
-    GoraMapper.initMapperJob(job, query, store, DynamoDBKey.class, VLongWritable.class, VerifyMapper.class, true);
-
-    job.getConfiguration().setBoolean("mapred.map.tasks.speculative.execution", false);
+    //GoraMapper.initMapperJob(job, query, store, DynamoDBKey.class, VLongWritable.class, VerifyMapper.class, true);
     
-    job.setReducerClass(VerifyReducer.class);
+    job.setMapperClass(VerifierMapper.class);
+    //job.setReducerClass(VerifyReducer.class);
+    
     job.setOutputFormatClass(TextOutputFormat.class);
     TextOutputFormat.setOutputPath(job, outputDir);
 
-    store.close();
-    
     job.submit();
   }
   
-
-
-  
-  
-  static class GeneratorInputFormat extends InputFormat<LongWritable,NullWritable> {
+  static class VerifierMapper extends Mapper<LongWritable, VLongWritable, LongWritable, VLongWritable>{
+    private Object auth;
+    private DataStore<DynamoDBKey<String, String>,cidynamonode> store;
     
-    static class GeneratorInputSplit extends InputSplit implements Writable {
+    private LongWritable row = new LongWritable();
+    
+    @SuppressWarnings("unchecked")
+    @Override
+    protected void setup(Context context) throws IOException, InterruptedException {
+      super.setup(context);
+      auth = new BasicAWSCredentials( context.getConfiguration().get("goraci.amazon.accessKey", ""),
+                                             context.getConfiguration().get("goraci.amazon.secretKey", ""));
+      store = WSDataStoreFactory.createDataStore(DynamoDBStore.class, DynamoDBKey.class, cidynamonode.class, auth);
+    }
+    
+    @Override
+    protected void map(LongWritable key, VLongWritable value, Context output) {
+      try {
+        //1 get an initial node
+        cidynamonode node = getInitialNode();
+        //1 mark it as read
+        setReadNode(node);
+        //1 emit it
+        row.set(Long.parseLong(node.getHashKey()));
+        // <row>:-1
+        output.write(row, DEF);
+        
+        //2 start until an unread node is found
+        while(node.getState() != 1){
+          //2   emit //<row referenced>:<row>
+          row.set(node.getPrev());
+          value.set(Long.parseLong(node.getHashKey()));
+          output.write(row, value);
+          //2   reading the rest of the linked list
+          node = getPrevNode(node.getPrev());
+          //2   mark newly read nodes as read
+          setReadNode(node);
+        }
+      } catch (IOException e) {
+        // TODO Auto-generated catch block
+        e.printStackTrace();
+      } catch (InterruptedException e) {
+        // TODO Auto-generated catch block
+        e.printStackTrace();
+      }
+    }
+    
+    private cidynamonode getPrevNode(long pPreviousNodeId){
+      cidynamonode pNode = null;
+      DynamoDBKey<String, String> dKey = new DynamoDBKey<String, String>();
+      dKey.setHashKey(String.valueOf(pPreviousNodeId));
+      pNode = store.get(dKey);
+      return pNode;
+    }
+    
+    @Override
+    protected void cleanup(Context context){
+      store.close();
+    }
+    
+    @SuppressWarnings({ "static-access", "rawtypes" })
+    private cidynamonode getInitialNode(){
+      cidynamonode node = null;
+      Random rand = new Random();
+      
+      try {
+        Query<DynamoDBKey<String, String>,cidynamonode> query = store.newQuery();
+        ((DynamoDBQuery)(query)).setType(DynamoDBQuery.SCAN_QUERY);
+        DynamoDBKey<String, String> randKey = new DynamoDBKey<String, String>();
+        randKey.setHashKey(String.valueOf(rand.nextLong()));
+        
+        query.setStartKey(randKey);
+        query.setKey(randKey);
+        query.setLimit(1);
+        query.setFields(new String[] {"prev"});
+        
+        //long t1 = System.currentTimeMillis();
+        Result<DynamoDBKey<String, String>, cidynamonode> rs;
+        
+        rs = store.execute(query);
+        
+        //long t2 = System.currentTimeMillis();
+        
+        // searching for readable object
+        while (rs.next()){
+          node = rs.get();
+          if (node.getState() != 1)
+            return node;
+        }
+        //if (rs.next()) {
+        //  System.out.printf("FSR %d %016x\n", t2 - t1, rs.getKey());
+        //  node = rs.get();
+        //}
+        
+        //System.out.println("FSR " + (t2 - t1));
+      
+      } catch (Exception e) {
+        // TODO Auto-generated catch block
+        e.printStackTrace();
+      }
+      return node;
+    }
+      
+    private void setReadNode(cidynamonode pNode){
+      // creating DynamoDBKey
+      DynamoDBKey<String, String> dKey = new DynamoDBKey<String, String>();
+      dKey.setHashKey(pNode.getHashKey());
+      // setting node as read
+      pNode.setState(1);
+      // persisting updated object
+      store.put(dKey, pNode);
+    }
+    
+    
+  }
+
+
+  static class VerifyReducer extends Reducer<LongWritable,VLongWritable,Text,Text> {
+    
+    private ArrayList<Long> refs = new ArrayList<Long>();
+    
+    public void reduce(LongWritable key, Iterable<VLongWritable> values, Context context) throws IOException, InterruptedException{
+      int defCount = 0;
+      
+      refs.clear();
+      for (VLongWritable type : values) {
+        if (type.get() == -1) {
+          defCount++;
+        } else {
+          refs.add(type.get());
+        }
+      }
+      
+      // TODO check for more than one def, should not happen
+
+      // this is bad, found a node that is referenced but not defined. 
+      // It must have been lost, emit some info about this node for debugging purposes.
+      if (defCount == 0 && refs.size() > 0) {
+        StringBuilder sb = new StringBuilder();
+        String comma = "";
+        for (Long ref : refs) {
+          sb.append(comma);
+          comma = ",";
+          sb.append(String.format("%016x", ref));
+        }
+        context.write(new Text(String.format("%016x", key.get())), new Text(sb.toString()));
+        context.getCounter(Counts.UNDEFINED).increment(1);
+      } 
+      // node is defined but not referenced
+      else if (defCount > 0 && refs.size() == 0) {
+        context.getCounter(Counts.UNREFERENCED).increment(1);
+      }
+      // node is defined and referenced
+      else {
+        context.getCounter(Counts.REFERENCED).increment(1);
+      }
+
+    }
+      
+  }
+  
+  static class VerifierInputFormat extends InputFormat<LongWritable,NullWritable> {
+    
+    static class VerifierInputSplit extends InputSplit implements Writable {
       
       @Override
       public long getLength() throws IOException, InterruptedException {
@@ -161,7 +325,7 @@ public class VerifyDynamoDB extends Configured implements Tool{
       public void write(DataOutput arg0) throws IOException {        }
    }
     
-    static class GeneratorRecordReader extends RecordReader<LongWritable,NullWritable> {
+    static class VerifierRecordReader extends RecordReader<LongWritable,NullWritable> {
       
       private long numNodes;
       private boolean hasNext = true;
@@ -200,7 +364,7 @@ public class VerifyDynamoDB extends Configured implements Tool{
     
     @Override
     public RecordReader<LongWritable,NullWritable> createRecordReader(InputSplit split, TaskAttemptContext context) throws IOException, InterruptedException {
-      GeneratorRecordReader rr = new GeneratorRecordReader();
+      VerifierRecordReader rr = new VerifierRecordReader();
       rr.initialize(split, context);
       return rr;
     }
@@ -212,7 +376,7 @@ public class VerifyDynamoDB extends Configured implements Tool{
       ArrayList<InputSplit> splits = new ArrayList<InputSplit>(numMappers);
       
       for (int i = 0; i < numMappers; i++) {
-        splits.add(new GeneratorInputSplit());
+        splits.add(new VerifierInputSplit());
       }
       
       return splits;
@@ -220,4 +384,8 @@ public class VerifyDynamoDB extends Configured implements Tool{
     
   }
   
+  public static void main(String[] args) throws Exception {
+    int ret = ToolRunner.run(new VerifyDynamoDB(), args);
+    System.exit(ret);
+  }
 }

@@ -216,21 +216,21 @@ public class Generator extends Configured implements Tool {
 	      
 	      Random rand = new Random();
 	      
-	      double[] first = null;
-	      double[] prev = null;
-	      double[] current = new double[WIDTH];
+	      long[] first = null;
+	      long[] prev = null;
+	      long[] current = new long[WIDTH];
 	      
 	      long count = 0;
 	      while (count < num) {
 	        for (int i = 0; i < current.length; i++)
-	          current[i] = Math.abs(rand.nextDouble());
+	          current[i] = Math.abs(rand.nextLong());
 	        
 	        persist(output, store, count, prev, current, id);
 	        
 	        if (first == null)
 	          first = current;
 	        prev = current;
-	        current = new double[WIDTH];
+	        current = new long[WIDTH];
 	        
 	        count += current.length;
 	        output.setStatus("Count " + count);
@@ -272,14 +272,14 @@ public class Generator extends Configured implements Tool {
      } 
   }
     
-    private static void circularLeftShift(double[] first) {
-      double ez = first[0];
+    private static void circularLeftShift(long[] first) {
+      long ez = first[0];
       for (int i = 0; i < first.length - 1; i++)
         first[i] = first[i + 1];
       first[first.length - 1] = ez;
     }
     
-    private static void persist(Context output, DataStore<DynamoDBKey<String, String>,cidynamonode> store, long count, double[] prev, double[] current, String id) throws Exception {
+    private static void persist(Context output, DataStore<DynamoDBKey<String, String>,cidynamonode> store, long count, long[] prev, long[] current, String id) throws Exception {
       System.out.println("Persisting");
       for (int i = 0; i < current.length; i++) {
     	cidynamonode node = new cidynamonode(); //store.newPersistent();
@@ -309,7 +309,7 @@ public class Generator extends Configured implements Tool {
       //store.flush();
     }
     
-    private static void updatePrev(DataStore<DynamoDBKey<String, String>,cidynamonode> store, double[] first, double[] current) throws IOException {
+    private static void updatePrev(DataStore<DynamoDBKey<String, String>,cidynamonode> store, long[] first, long[] current) throws IOException {
       System.out.println("Trying to update previous");
       try {
         for (int i = 0; i < current.length; i++) {
@@ -393,8 +393,6 @@ public class Generator extends Configured implements Tool {
   }
   
   public static void main(String[] args) throws Exception {
-    // ak AKIAIAWPG2LB6XI23WTQ
-    // sk IYWQPxjR97kNNXXU1RXBFM2kewqjhlK8BNeY6hZc
     int ret = ToolRunner.run(new Generator(), args);
     System.exit(ret);
   }

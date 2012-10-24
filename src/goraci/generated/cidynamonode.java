@@ -33,10 +33,10 @@ public class cidynamonode implements Persistent {
     public String getClient() {  return client;  }
     public void setClient(String pClient) {  this.client = pClient;  }
 
-    private double prev;
+    private long prev;
     @DynamoDBAttribute(attributeName = "Prev")
-    public double getPrev() {  return prev;  }
-    public void setPrev(double pPrev) {  this.prev = pPrev;  }
+    public long getPrev() {  return prev;  }
+    public void setPrev(long pPrev) {  this.prev = pPrev;  }
 
     private double state;
     @DynamoDBAttribute(attributeName = "State")
